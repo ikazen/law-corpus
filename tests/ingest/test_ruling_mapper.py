@@ -158,6 +158,31 @@ def test_classify_prec_outcome_taxpayer_lose():
     assert mapped.outcome == "납세자패"
 
 
+def test_classify_prec_outcome_win_gap_wide_enough_for_real_phrasing():
+    """실측(2024누47618, 1심 일부 인용): '청구는' 뒤에 수식어가 길게 낀 실제 표현 —
+    기존 gap 제한(10자)이 너무 좁아 아예 매칭 실패(outcome=None)하던 문제."""
+    raw = RawRuling(
+        ruling_id="x", source="서울고등법원", case_no="2024누47618", decided_at="20200101",
+        title="", gist="",
+        body="그렇다면 원고의 이 사건 청구는 위 인정 범위 내에서 이유 있으므로 이를 인용하고, "
+             "나머지 청구는 이유 없어 이를 기각하여야 한다.",
+    )
+    mapped = map_ruling(raw)
+    assert mapped.outcome == "납세자승"
+
+
+def test_classify_prec_outcome_mixed_win_and_lose_in_same_text_is_none():
+    """원고 청구 일부 인용 + 나머지 기각이 모두 뚜렷하게 잡히는 경우 — 대법원 분기의
+    '혼합 결과는 None' 원칙과 일관되게 처리해야 한다(수정 전에는 WIN이 먼저 검사돼
+    무조건 납세자승으로 오분류됐다)."""
+    raw = RawRuling(
+        ruling_id="x", source="서울행정법원", case_no="2020구합1", decided_at="20200101",
+        title="", gist="", body="원고의 청구를 일부 인용하고 나머지 청구는 기각한다.",
+    )
+    mapped = map_ruling(raw)
+    assert mapped.outcome is None
+
+
 def test_extract_anti_avoidance_keywords():
     raw = RawRuling(
         ruling_id="x", source="대법원", case_no="2020두1", decided_at="20200101",

@@ -40,3 +40,17 @@ def iter_chunks(tree: dict) -> Iterator[tuple[str, str]]:
             text_parts.append(sub["text"])
             text_parts.extend(item["text"] for item in sub["items"])
         yield path, "\n".join(text_parts)
+
+
+def tree_full_text(tree: dict) -> str:
+    """tree(항/호/목 계층) 전체를 평문으로 이어붙인다. article_version.body는 항 구조가
+    있는 조문에서는 "제14조(실질과세)" 같은 표제 한 줄뿐이고 실제 내용은 tree 안에 있다
+    (실측으로 발견 — the-book-of-moon adversarial review) — body만 스캔/재순위 입력으로
+    쓰면 대부분의 조문에서 내용이 통째로 빠진다."""
+    parts = []
+    for clause in tree.get("clauses", []):
+        parts.append(clause["text"])
+        for sub in clause["sub_clauses"]:
+            parts.append(sub["text"])
+            parts.extend(item["text"] for item in sub["items"])
+    return "\n".join(parts)

@@ -14,15 +14,20 @@ from lawcorpus.types import Hit
 
 
 async def vector_search(query: str, as_of: date, settings, top_n: int = 30) -> list[Hit]:
-    """as_of가 오늘(또는 현재 유효 범위)이면 HNSW 부분 인덱스(is_current)를 타는 빠른 경로,
-    아니면 article_version 조인으로 그 시점에 유효했던 버전만 거른다(현재는 과거 버전을
-    임베딩하지 않아 결과가 항상 비지만, 쿼리 자체는 시점 무관하게 정확하다)."""
+    """as_of가 정확히 오늘이면 HNSW 부분 인덱스(is_current)를 타는 빠른 경로, 아니면
+    article_version 조인으로 그 시점에 유효했던 버전만 거른다.
+
+    is_current는 "오늘 시행 중"을 뜻하도록 embed_backfill이 채운다(valid_to IS NULL과는
+    다르다 — 세법은 시행일이 몇 달 뒤인 개정을 미리 공포하는 경우가 흔해 valid_to IS NULL인
+    버전의 valid_from이 미래인 사례가 실제로 다수 있었다). 그래서 오늘이 아닌 미래 as_of도
+    빠른 경로로 보내면 안 된다 — 임베딩 시점과 그 미래 시점 사이에 새 개정이 시행될 수
+    있고, 어차피 미래/과거 버전은 임베딩하지 않으므로(결정 P) 정확한 경로는 이 조인 쿼리뿐이다."""
     as_of = require_as_of(as_of)
     vector = await embed_query(query, settings)
 
     pool = get_pool()
     async with pool.acquire() as conn:
-        if as_of >= date.today():
+        if as_of == date.today():
             rows = await conn.fetch(
                 """
                 SELECT ae.chunk_id, ae.article_key, av.article_id, ae.chunk_path, ae.chunk_text,

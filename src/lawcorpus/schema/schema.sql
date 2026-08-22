@@ -159,6 +159,10 @@ CREATE INDEX IF NOT EXISTS loophole_candidate_status_idx  ON loophole_candidate 
 CREATE INDEX IF NOT EXISTS loophole_candidate_article_idx ON loophole_candidate (article_id);
 
 -- 임베딩 (항 단위. is_current 부분 인덱스가 기본 검색 경로 — 과거 시점 검색은 드물어 별도 처리)
+-- is_current = "오늘 실제로 시행 중"(valid_from <= CURRENT_DATE AND (valid_to IS NULL OR
+-- valid_to > CURRENT_DATE)) 이다 — article_version.valid_to IS NULL("아직 다음 버전이
+-- 없다")과는 다르다. 세법은 시행일이 몇 달 뒤인 개정을 미리 공포하는 경우가 흔해서 valid_to
+-- IS NULL인 버전의 valid_from이 미래인 사례가 실제로 다수 있다(실측: 3,053건 중 2,175건).
 CREATE TABLE IF NOT EXISTS article_embedding (
     chunk_id      bigserial PRIMARY KEY,
     article_key   bigint NOT NULL REFERENCES article_version,
