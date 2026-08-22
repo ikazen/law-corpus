@@ -12,6 +12,7 @@ from datetime import date
 from lawcorpus.config import LawCorpusSettings
 from lawcorpus.db.pg import get_pool
 from lawcorpus.graph_queries import expand_refs
+from lawcorpus.ingest.tree import tree_full_text
 from lawcorpus.resolution import get_article_by_id, require_as_of
 from lawcorpus.retrieval.fusion import rrf_fuse
 from lawcorpus.retrieval.keyword_search import keyword_search
@@ -86,8 +87,10 @@ async def search(
         return []
 
     proxy_hits = [
-        Hit(article_key=c.version.article_key, article_id=c.version.article_id,
-            chunk_path="", text=c.version.body, score=c.score)
+        Hit(
+            article_key=c.version.article_key, article_id=c.version.article_id, chunk_path="",
+            text=f"{c.version.body}\n{tree_full_text(c.version.tree)}", score=c.score,
+        )
         for c in candidates
     ]
     reranked = await rerank(query, proxy_hits, settings, top_k=top_k)

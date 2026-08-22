@@ -13,8 +13,8 @@ from datetime import date
 
 from lawcorpus.ingest.models import RawRuling
 
-_TAXPAYER_WIN_RE = re.compile(r"(원고|납세자|청구인)(?:들)?.{0,10}?청구(?:를|는)?.{0,10}?(인용|받아들|이유\s*있)")
-_TAXPAYER_LOSE_RE = re.compile(r"(원고|납세자|청구인)(?:들)?.{0,10}?청구(?:를|는)?.{0,10}?(기각|이유\s*없)")
+_TAXPAYER_WIN_RE = re.compile(r"(원고|납세자|청구인)(?:들)?.{0,10}?청구(?:를|는)?.{0,30}?(인용|받아들|이유\s*있)")
+_TAXPAYER_LOSE_RE = re.compile(r"(원고|납세자|청구인)(?:들)?.{0,10}?청구(?:를|는)?.{0,30}?(기각|이유\s*없)")
 
 # 대법원/항소심 판결은 "원고의 청구를 인용/기각" 대신 "상고를 기각한다"/"파기하고... 환송한다"
 # 식으로 결론을 낸다 — 조세소송 구조상 원고는 항상 납세자, 피고는 항상 과세관청이므로(실측
@@ -67,9 +67,13 @@ def _classify_prec_outcome(text: str) -> str | None:
             return "납세자승"
         return None
 
-    if _TAXPAYER_WIN_RE.search(text):
+    win_match = bool(_TAXPAYER_WIN_RE.search(text))
+    lose_match = bool(_TAXPAYER_LOSE_RE.search(text))
+    if win_match and lose_match:
+        return None  # 일부인용+일부기각(혼합 결과) — 대법원 분기와 같은 원칙으로 불명 처리
+    if win_match:
         return "납세자승"
-    if _TAXPAYER_LOSE_RE.search(text):
+    if lose_match:
         return "납세자패"
     return None
 

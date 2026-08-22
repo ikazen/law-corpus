@@ -1,5 +1,6 @@
 """Neo4j 전량 재생성. PG(SoT)에서 읽어 그래프를 통째로 다시 만든다 — 증분 동기화 버그를
-원천 차단하는 전략(설계문서 3.3). 규모가 작아 수 분이면 끝난다.
+원천 차단하는 전략(설계문서 3.3). UNWIND 배치로 처리한다 — 실측 결과 이력이 깊은 법령은
+30만+ Version/HAS_VERSION/SUPERSEDES가 나와 행 1건당 왕복이면 시간이 오래 걸린다.
 
 DELEGATES/REFERS_TO/MUTATIS 엣지는 아직 PG에 저장돼 있지 않아(#31은 추출 함수만 만들었다)
 이 빌더가 statute별로 lsDelegated를 다시 조회해서 즉석 반영한다 — "PG만으로 재생성"
@@ -17,6 +18,7 @@ from neo4j import AsyncGraphDatabase
 
 from lawcorpus.graph.extract_refs import extract_defines, extract_delegation_edges
 from lawcorpus.ingest.law_api import fetch_law_delegations
+from lawcorpus.ingest.tree import tree_full_text
 
 _MANAGED_LABELS = (
     "Statute", "Article", "Version", "Addendum", "Ruling",
@@ -188,18 +190,6 @@ async def _build_delegation_edges(
     return edge_count
 
 
-def _tree_full_text(tree: dict) -> str:
-    """정의 표현("...란 ...을 말한다")은 조문 자체(body)가 아니라 항/호/목 안에 있는 경우가
-    대부분이다 — body만 스캔하면 놓친다(실측으로 발견)."""
-    parts = []
-    for clause in tree.get("clauses", []):
-        parts.append(clause["text"])
-        for sub in clause["sub_clauses"]:
-            parts.append(sub["text"])
-            parts.extend(item["text"] for item in sub["items"])
-    return "\n".join(parts)
-
-
 async def _build_defines_edges(pg_conn: asyncpg.Connection, session) -> int:
     rows = await pg_conn.fetch(
         "SELECT DISTINCT ON (article_id) article_id, body, tree FROM article_version "
@@ -208,7 +198,7 @@ async def _build_defines_edges(pg_conn: asyncpg.Connection, session) -> int:
     edge_count = 0
     for row in rows:
         tree = json.loads(row["tree"]) if isinstance(row["tree"], str) else row["tree"]
-        full_text = row["body"] + "\n" + _tree_full_text(tree)
+        full_text = row["body"] + "\n" + tree_full_text(tree)
         for term in extract_defines(full_text):
             result = await session.run(
                 "MERGE (t:Term {name: $term}) "

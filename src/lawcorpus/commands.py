@@ -345,6 +345,16 @@ def _try_parse_yyyymmdd(raw: str) -> date | None:
     return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
 
 
+def _law_prefix_text(parsed: dict) -> str:
+    """parse_citation이 성공한 결과에서 '법령명(+구법 시점 괄호)' 접두어 문자열을 재구성한다.
+    콤마로 나열된 다음 조문("국세기본법 제14조, 제15조")은 법령명이 생략되므로, 직전
+    성공한 인용의 접두어를 이어붙여 재시도해야 한다(아래 _resolve_ref_articles)."""
+    if parsed["historical_date"]:
+        d = parsed["historical_date"]
+        return f"구 {parsed['law']}({d.year}. {d.month}. {d.day}. 법률로 개정되기 전의 것) "
+    return f"{parsed['law']} "
+
+
 async def _resolve_ref_articles(
     conn: asyncpg.Connection, refs: tuple[str, ...], law_names: list[str], decided_on: date,
 ) -> tuple[list[int], list[int]]:
@@ -352,13 +362,23 @@ async def _resolve_ref_articles(
 
     lawcorpus.resolution.resolve_citation과 같은 파싱 로직(parse_citation)을 쓰지만, 전역
     pool(get_pool)이 아니라 ingest_rulings가 이미 열어둔 conn을 그대로 재사용한다 —
-    commands.py의 다른 함수들과 마찬가지로 커넥션을 직접 열고 닫는 방식을 유지한다."""
+    commands.py의 다른 함수들과 마찬가지로 커넥션을 직접 열고 닫는 방식을 유지한다.
+
+    법제처 참조조문 원문은 "국세기본법 제14조, 제15조, 제47조 제2항"처럼 같은 법령의 여러
+    조문을 콤마로 나열할 때 두 번째부터 법령명을 생략한다(실측 확인, the-book-of-moon
+    adversarial review). _split_refs가 콤마 단위로 쪼개면 이 생략된 조각은 법령명이 없어
+    parse_citation이 통째로 실패한다 — 직전에 성공한 인용의 법령명(+구법 시점)을 이어붙여
+    재시도해서 이 조각도 같은 법령·같은 시점으로 해소한다."""
     article_keys: list[int] = []
     article_ids: list[int] = []
+    last_prefix: str | None = None
     for ref in refs:
         parsed = parse_citation(ref, law_names)
+        if parsed is None and last_prefix is not None:
+            parsed = parse_citation(last_prefix + ref, law_names)
         if parsed is None:
             continue
+        last_prefix = _law_prefix_text(parsed)
         anchor = parsed["historical_date"] or decided_on
         row = await conn.fetchrow(
             """
@@ -551,23 +571,32 @@ async def load_rewrite_map(csv_path: str, settings) -> None:
 # ---------------------------------------------------------------------------
 
 async def embed_backfill(settings, *, batch_size: int = 64) -> None:
-    """현행(valid_to IS NULL) article_version만 항 단위로 청킹해 임베딩한다(결정 P) —
-    과거 버전은 HNSW 인덱스에도 안 들어가 임베딩해도 검색에 안 쓰인다. 과거 시점 의미검색
-    수요가 확인되면 그때 범위를 넓힌다."""
+    """"오늘 실제로 시행 중인" article_version만 항 단위로 청킹해 임베딩한다(결정 P) — 과거
+    버전은 HNSW 인덱스에도 안 들어가 임베딩해도 검색에 안 쓰인다. 과거 시점 의미검색 수요가
+    확인되면 그때 범위를 넓힌다.
+
+    valid_to IS NULL("아직 다음 버전이 없다")과 "오늘 시행 중이다"는 다르다 — 세법은 시행일이
+    몇 달 뒤인 개정을 미리 공포하는 경우가 흔해서, valid_to IS NULL인 버전의 valid_from이
+    미래인 사례가 실제로 다수 있었다(실측 — the-book-of-moon adversarial review, 3,053건
+    중 2,175건이 미래 valid_from). valid_to IS NULL만 보고 임베딩하면 "현행"이라는 이름으로
+    아직 시행되지 않은 조문을 검색에 노출하고, 정작 오늘 시행 중인 버전은 하나도 임베딩되지
+    않아 검색 자체가 안 되는 조문이 다수 생긴다."""
     conn = await asyncpg.connect(dsn=settings.pg_dsn)
     await register_vector(conn)
     try:
-        # 재실행 시 그사이 개정으로 더 이상 현행이 아니게 된 청크의 is_current를 내린다 —
-        # 안 그러면 HNSW 부분 인덱스(WHERE is_current)에 낡은 버전이 계속 남는다.
-        await conn.execute(
-            """
-            UPDATE article_embedding ae SET is_current = false
-            FROM article_version av
-            WHERE ae.article_key = av.article_key AND av.valid_to IS NOT NULL AND ae.is_current
-            """
+        rows = await conn.fetch(
+            "SELECT article_key, tree FROM article_version "
+            "WHERE valid_from <= CURRENT_DATE AND (valid_to IS NULL OR valid_to > CURRENT_DATE)"
         )
 
-        rows = await conn.fetch("SELECT article_key, tree FROM article_version WHERE valid_to IS NULL")
+        # 오늘 시행 중인 article_key 집합 밖에 있는 낡은 is_current 표시를 내린다 —
+        # 개정으로 교체된 과거 버전뿐 아니라, 이 수정 이전에 미래 버전이 잘못 is_current=true로
+        # 임베딩됐던 행도 여기서 함께 정리된다.
+        current_keys = [row["article_key"] for row in rows]
+        await conn.execute(
+            "UPDATE article_embedding SET is_current = false WHERE is_current AND NOT (article_key = ANY($1))",
+            current_keys,
+        )
         chunks: list[tuple[int, str, str]] = []
         for row in rows:
             tree = json.loads(row["tree"]) if isinstance(row["tree"], str) else row["tree"]

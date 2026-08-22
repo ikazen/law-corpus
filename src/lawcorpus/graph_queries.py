@@ -65,17 +65,24 @@ async def expand_refs(
 
 
 async def get_delegation_chain(article_id: int, as_of: date) -> list[ArticleVersion]:
-    """법률 -> 시행령 -> 시행규칙처럼 위임을 타고 내려가는 가장 긴 경로를 시점 해소해 반환한다."""
+    """법률 -> 시행령 -> 시행규칙처럼 위임을 타고 내려가는 가장 긴 경로를 시점 해소해 반환한다.
+
+    as_of 시점에 유효한 DELEGATES 엣지만 탄다 — 이전에는 이 필터가 빠져 있어서(실측으로
+    발견, adversarial review) as_of를 인자로 받으면서도 정작 그래프 순회 자체는 시점과
+    무관하게 모든 엣지를 탔다. 지금은 모든 엣지의 valid_to가 NULL이라(#31 — lsDelegated가
+    현재 스냅샷 기준) 결과가 우연히 맞았을 뿐, 엣지에 실제 유효기간이 들어가기 시작하면
+    바로 틀린 값을 돌려주는 상태였다."""
     as_of = require_as_of(as_of)
     driver = get_driver()
     async with driver.session() as session:
         result = await session.run(
-            """
-            MATCH path = (a:Article {article_id: $id})-[:DELEGATES*1..3]->(next:Article)
+            f"""
+            MATCH path = (a:Article {{article_id: $id}})-[rels:DELEGATES*1..3]->(next:Article)
+            WHERE ALL(rel IN rels WHERE {_VALID_AT_CLAUSE})
             RETURN [n IN nodes(path)[1..] | n.article_id] AS chain
             ORDER BY length(path) DESC LIMIT 1
             """,
-            id=article_id,
+            id=article_id, as_of=str(as_of),
         )
         record = await result.single()
 
@@ -91,17 +98,25 @@ async def get_delegation_chain(article_id: int, as_of: date) -> list[ArticleVers
 
 
 async def get_mutatis_terminals(article_id: int, as_of: date) -> list[ArticleVersion]:
-    """준용(MUTATIS) 사슬을 타고 들어가면 도달하는, 더 이상 준용하지 않는 실효 조문들."""
+    """준용(MUTATIS) 사슬을 타고 들어가면 도달하는, 더 이상 준용하지 않는 실효 조문들.
+
+    as_of 시점에 유효한 MUTATIS 엣지만 탄다(get_delegation_chain과 같은 이유로 수정 —
+    adversarial review에서 발견). "더 이상 준용 안 함" 판정도 같은 시점 필터를 걸어야 한다 —
+    안 그러면 as_of 시점엔 무효였던 엣지 때문에 종단이 아닌 조문이 종단으로 잘못 걸러진다."""
     as_of = require_as_of(as_of)
     driver = get_driver()
     async with driver.session() as session:
         result = await session.run(
-            """
-            MATCH p = (a:Article {article_id: $id})-[:MUTATIS*1..4]->(end:Article)
-            WHERE NOT (end)-[:MUTATIS]->()
+            f"""
+            MATCH p = (a:Article {{article_id: $id}})-[:MUTATIS*1..4]->(end:Article)
+            WHERE ALL(rel IN relationships(p) WHERE {_VALID_AT_CLAUSE})
+              AND NOT EXISTS {{
+                MATCH (end)-[rel2:MUTATIS]->()
+                WHERE {_VALID_AT_CLAUSE.replace("rel.", "rel2.")}
+              }}
             RETURN DISTINCT end.article_id AS article_id
             """,
-            id=article_id,
+            id=article_id, as_of=str(as_of),
         )
         records = [record async for record in result]
 
